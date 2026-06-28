@@ -17,6 +17,7 @@ const columns: FooterColumn[] = [
     links: [
       { label: "Journal", href: "/journal" },
       { label: "Probador virtual", href: "/fitting-room" },
+      { label: "Cómo comprar", href: "/pago" },
       { label: "Contacto", href: "/contact" },
       { label: "Preguntas frecuentes", href: "/faq" },
     ],

@@ -128,6 +128,8 @@ export default function ProductPage({ params }: ProductPageProps) {
               colors={product.colors}
               sizes={product.sizes}
               slug={product.slug}
+              productName={product.name}
+              price={product.price}
             />
           </div>
 
