@@ -9,10 +9,11 @@
 const priceFormatter = new Intl.NumberFormat("es-MX", {
   style: "currency",
   currency: "USD",
-  maximumFractionDigits: 0,
+  minimumFractionDigits: 2,
+  maximumFractionDigits: 2,
 });
 
-/** Format a whole-unit price as a localized currency string. */
+/** Format a price as a localized currency string with two decimals. */
 export function formatPrice(value: number): string {
   return priceFormatter.format(value);
 }
