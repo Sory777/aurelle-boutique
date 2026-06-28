@@ -15,7 +15,7 @@ Each requirement is traceable to a design decision. The acceptance criteria are 
 - **Inventory_Service**: The service that tracks `onHand` and `reserved` units per variant and performs reservations, commits, and releases.
 - **Payment_Service**: The service that creates payment intents, verifies and processes provider webhooks, and issues refunds.
 - **Shipping_Service**: The service that quotes shipping options, creates shipments, and reports tracking status.
-- **Virtual_Fitting_Room**: The flagship AI try-on subsystem that renders garments onto a shopper's image, simulates fabric drape, and recommends sizes (backed by `TryOnService`).
+- **Virtual_Fitting_Room**: The flagship AI try-on subsystem that runs entirely client-side (on-device ML via MediaPipe / TensorFlow.js over WebGL/WASM) to detect body landmarks, segment the person, and composite a 2D garment overlay onto a shopper's image in the browser, and that recommends sizes (backed by `TryOnService`). Raw user images are processed locally and never uploaded.
 - **Fashion_Assistant**: The LLM-plus-RAG conversational subsystem that provides styling advice and grounded product recommendations.
 - **Search_Service**: The hybrid keyword-plus-vector search subsystem, including image-based visual search.
 - **Auth_Service**: The service that establishes sessions and evaluates permissions (`getSession`, `hasPermission`, `assertPermission`).
@@ -27,7 +27,7 @@ Each requirement is traceable to a design decision. The acceptance criteria are 
 - **Session**: An authenticated context containing a user id, a role name, and the effective permission set equal to that role's permissions.
 - **Permission**: A discrete capability token (for example `catalog:write`, `order:refund`) granted by a role.
 - **Idempotency_Key**: A client-generated unique token used to deduplicate checkout and payment operations.
-- **Body_Profile**: A user's stored measurements and fit preference used by the Virtual_Fitting_Room, including an explicit image-storage consent flag.
+- **Body_Profile**: A user's stored measurements and fit preference used by the Virtual_Fitting_Room to recommend sizes. Try-on images are processed locally in the browser and never uploaded, so the Body_Profile holds no image-storage consent flag.
 
 ## Requirements
 
@@ -114,18 +114,19 @@ Each requirement is traceable to a design decision. The acceptance criteria are 
 4. WHEN a user removes a product from favorites, THE Storefront SHALL delete the corresponding wishlist entry.
 5. WHEN a visitor activates sharing on a product, THE Storefront SHALL provide a shareable link to the product through the Web Share API or a copy-link action.
 
-### Requirement 8: AI Virtual Fitting Room — Try-On Job Lifecycle
+### Requirement 8: AI Virtual Fitting Room — Client-Side Try-On Rendering
 
-**User Story:** As a shopper, I want to render a garment onto my own photo, so that I can see how the item looks on my body before purchasing.
+**User Story:** As a shopper, I want to render a garment onto my own photo or live camera view directly in my browser, so that I can see how the item looks on my body before purchasing without sending my image anywhere.
 
 #### Acceptance Criteria
 
-1. WHEN a user submits a try-on request with an image or camera frame, a product id, and a variant, THE Virtual_Fitting_Room SHALL create a try-on job with status `QUEUED` and return the job id with HTTP status 202.
-2. WHEN a try-on job is created, THE Virtual_Fitting_Room SHALL enqueue the job for processing on the dedicated GPU inference service rather than executing rendering on the serverless application layer.
-3. WHILE a try-on job has not completed, THE Virtual_Fitting_Room SHALL report the job status as `QUEUED` or `PROCESSING` in response to a status request.
-4. WHEN GPU rendering completes successfully, THE Virtual_Fitting_Room SHALL set the job status to `DONE` and provide multi-view and 360-degree output references along with a recommended size and fit notes.
-5. WHEN a user requests a completed job, THE Virtual_Fitting_Room SHALL return the rendered view references and the recommended size.
-6. IF GPU rendering fails or the input image is unusable, THEN THE Virtual_Fitting_Room SHALL set the job status to `FAILED` with a reason and SHALL NOT initiate any charge for the failed render.
+1. WHEN a user provides a photo upload or starts the live camera together with a product id and a variant, THE Virtual_Fitting_Room SHALL detect body landmarks and segment the person on-device in the browser and composite a 2D garment overlay over the user's image.
+2. WHEN the Virtual_Fitting_Room renders a try-on, THE Virtual_Fitting_Room SHALL process the user's image locally in the browser and SHALL NOT upload the image to any server.
+3. WHEN a user provides a try-on input, THE Virtual_Fitting_Room SHALL produce the rendered overlay synchronously in the browser without creating a job id, a queue entry, or a server-side GPU render request.
+4. WHEN a try-on overlay is rendered, THE Virtual_Fitting_Room SHALL present a front view with a before-and-after toggle between the user's original image and the overlaid image.
+5. WHEN a user selects a different garment or variant during an active try-on, THE Virtual_Fitting_Room SHALL switch the displayed garment overlay without requiring a new image capture.
+6. IF the Virtual_Fitting_Room cannot detect a body pose in the provided input, THEN THE Virtual_Fitting_Room SHALL display an in-browser error that prompts the user to recapture and SHALL NOT upload the image.
+7. IF the user's device or browser does not support the on-device try-on, THEN THE Virtual_Fitting_Room SHALL display an in-browser unsupported-device message and SHALL NOT upload the image.
 
 ### Requirement 9: Virtual Fitting Room — Size Simulation, Recommendation, and Comparison
 
@@ -136,17 +137,19 @@ Each requirement is traceable to a design decision. The acceptance criteria are 
 1. WHEN a user requests a size recommendation for a garment with a non-empty set of available sizes, THE Virtual_Fitting_Room SHALL return a recommended size that is a member of the available sizes.
 2. WHEN a size recommendation is returned, THE Virtual_Fitting_Room SHALL include a confidence value within the closed interval from 0 to 1.
 3. IF a user's body measurements are absent, THEN THE Virtual_Fitting_Room SHALL recommend the available size closest to the user's historical purchases while keeping the recommendation within the available sizes.
-4. WHEN a user requests a size comparison across multiple sizes, THE Virtual_Fitting_Room SHALL render the same garment for each requested size for side-by-side comparison.
+4. WHEN a user changes the simulated size during an active try-on, THE Virtual_Fitting_Room SHALL rescale the 2D garment overlay in the browser to reflect the selected size.
+5. WHEN a user requests a two-size comparison, THE Virtual_Fitting_Room SHALL render the same garment overlay at the two selected sizes side-by-side in the browser.
 
-### Requirement 10: Virtual Fitting Room — Privacy and Consent
+### Requirement 10: Virtual Fitting Room — Local-Only Image Privacy
 
-**User Story:** As a shopper, I want control over my uploaded images, so that my personal photos are protected and only retained with my permission.
+**User Story:** As a shopper, I want my try-on photos to stay on my own device, so that my personal images are never sent to or stored on any server.
 
 #### Acceptance Criteria
 
-1. WHEN a raw user image is stored for try-on, THE Virtual_Fitting_Room SHALL store the image encrypted with a short time-to-live reference.
-2. IF the user's Body_Profile `consentToStoreImages` is false, THEN THE Virtual_Fitting_Room SHALL delete the raw user image immediately after rendering completes.
-3. WHERE the user's Body_Profile `consentToStoreImages` is true, THE Virtual_Fitting_Room SHALL retain the encrypted image within the consented retention policy.
+1. WHEN a user provides an image or live camera frame for try-on, THE Virtual_Fitting_Room SHALL process the image entirely within the browser on the user's device.
+2. THE Virtual_Fitting_Room SHALL keep raw user try-on images on the device and SHALL NOT upload, transmit, or store them on any server.
+3. WHEN a try-on session ends, THE Virtual_Fitting_Room SHALL retain the user's image and rendered overlay only in browser memory and SHALL NOT persist them server-side.
+4. WHERE the Virtual_Fitting_Room optionally requests a size recommendation from a server endpoint, THE Virtual_Fitting_Room SHALL send only non-image body parameters and SHALL NOT include the user's image.
 
 ### Requirement 11: AI Fashion Assistant
 

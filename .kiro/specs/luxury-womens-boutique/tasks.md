@@ -259,28 +259,28 @@ The five correctness properties from the design are implemented as property-base
 - [ ] 16. Checkpoint - end-to-end purchase path
   - Ensure all tests pass, ask the user if questions arise.
 
-- [ ] 17. AI Virtual Fitting Room (flagship)
-  - [ ] 17.1 Implement createTryOnJob with encrypted short-TTL image storage
-    - Store the raw image encrypted with a short-TTL reference, insert a `QUEUED` job, enqueue it for the GPU service (never render on serverless), and return 202 with the job id
-    - _Requirements: 8.1, 8.2, 10.1_
-  - [ ] 17.2 Implement GPU dispatch and job status lifecycle
-    - Worker dispatch and status transitions `QUEUED → PROCESSING → DONE/FAILED`; on success store multi-view/360 output refs, recommended size, and fit notes; on failure store a reason and never initiate a charge
-    - _Requirements: 8.3, 8.4, 8.5, 8.6_
-  - [ ] 17.3 Implement recommendSize
-    - Return a recommended size that is a member of the non-empty available-size set with confidence in `[0,1]`; when measurements are absent, fall back to the closest available size to historical purchases
-    - _Requirements: 9.1, 9.2, 9.3_
-  - [ ]* 17.4 Write property test for size recommendation membership
+- [x] 17. AI Virtual Fitting Room (flagship, client-side)
+  - [x] 17.1 Add client-side ML dependencies and the lazy-loading fitting-room module
+    - Add the on-device ML dependencies (MediaPipe Tasks Vision / TensorFlow.js BlazePose + Selfie Segmentation or BodyPix); create a `components/fitting-room` (and supporting `lib`) module that lazy-loads the pose and segmentation models in the browser over WebGL/WASM
+    - _Requirements: 8.1, 8.2_
+  - [x] 17.2 Implement the in-browser try-on pipeline
+    - Capture via photo upload and live camera (`getUserMedia`); run pose-landmark detection and person segmentation on-device; anchor and warp a 2D garment overlay to shoulders/torso/hips and composite it onto a canvas — synchronous, with no upload, no job id, and no queue; provide a front view, a before/after toggle, and instant garment switching
+    - _Requirements: 8.1, 8.3, 8.4, 8.5_
+  - [x] 17.3 Implement the deterministic recommendSize function
+    - Pure, deterministic `recommendSize` whose `recommendedSize ∈ availableSizes` and `confidence ∈ [0,1]`, falling back to the closest available size when measurements are absent; optionally expose it via a tiny stateless `POST /api/try-on/size` route that receives only non-image body parameters
+    - _Requirements: 9.1, 9.2, 9.3, 10.4_
+  - [x]* 17.4 Write property test for size recommendation membership
     - **Property 4: Size recommendation ∈ available sizes**
     - **Validates: Requirements 9.1, 9.2**
-  - [ ] 17.5 Implement compareSizes
-    - Render the same garment for each requested size for side-by-side comparison
-    - _Requirements: 9.4_
-  - [ ] 17.6 Implement consent-based image retention
-    - Delete the raw image immediately after render when `consentToStoreImages` is false; retain the encrypted image within the consented policy when true
-    - _Requirements: 10.2, 10.3_
-  - [ ] 17.7 Build the Fitting Room UI and try-on routes
-    - PhotoCapturePanel (`getUserMedia`/upload), TryOnRenderViewer (multi-view/360, before/after), SizeSimulator/Compare; `POST /api/try-on`, `GET /api/try-on/:jobId`, `POST /api/try-on/size`
-    - _Requirements: 8.1, 8.3, 8.5, 9.4_
+  - [x] 17.5 Implement size simulation and two-size comparison
+    - Rescale the 2D garment overlay per selected size in the browser, and render the same garment overlay at two selected sizes side-by-side for comparison
+    - _Requirements: 9.4, 9.5_
+  - [x] 17.6 Implement local-only privacy guarantees and graceful errors
+    - Never upload or transmit the user's image; show in-browser errors for "no pose detected" (prompt recapture) and "unsupported device", processing everything locally
+    - _Requirements: 8.6, 8.7, 10.1, 10.2, 10.3_
+  - [x] 17.7 Build the Fitting Room UI and routes
+    - PhotoCapturePanel (`getUserMedia`/upload), TryOnOverlayViewer (front view, before/after), SizeSimulator/Compare; wire the existing "Probar virtualmente" button on the PDP to launch it; routes `/fitting-room` and `/p/[slug]/try-on`
+    - _Requirements: 8.1, 8.4, 9.4, 9.5_
 
 - [ ] 18. AI Fashion Assistant
   - [ ] 18.1 Implement the embedding service and assistant orchestrator with memory
@@ -351,8 +351,8 @@ The five correctness properties from the design are implemented as property-base
   - [ ] 23.3 Tune vector search for latency
     - HNSW cosine indexes, bounded ANN `k`, and SQL pre-filter predicates to keep candidate sets small
     - _Requirements: 22.3_
-  - [ ] 23.4 Implement GPU try-on backpressure
-    - Per-user concurrency caps, queueing of additional jobs rather than rejection, and per-(user, garment, size) result caching
+  - [ ] 23.4 Optimize client-side try-on performance
+    - Lazy-load and CDN-cache the on-device ML models once, run a quick WebGL/capability check with a lightweight fallback, and keep overlay rendering smooth (e.g., via a Web Worker / `requestAnimationFrame`)
     - _Requirements: 22.5_
   - [ ] 23.5 Add checkout API latency safeguards
     - Minimize round-trips and cache pricing context inputs so the checkout API stays within its latency budget (excluding PSP)

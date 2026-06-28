@@ -124,7 +124,11 @@ export default function ProductPage({ params }: ProductPageProps) {
           </p>
 
           <div className="mt-10">
-            <VariantSelector colors={product.colors} sizes={product.sizes} />
+            <VariantSelector
+              colors={product.colors}
+              sizes={product.sizes}
+              slug={product.slug}
+            />
           </div>
 
           {/* Materials & care */}

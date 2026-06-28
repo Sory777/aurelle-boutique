@@ -2,9 +2,9 @@
 
 ## Overview
 
-**AURÉLLE** is a premium, women-only fashion e-commerce platform whose flagship differentiator is an **AI Virtual Fitting Room** that renders garments onto a shopper's own body, simulates fabric drape, and recommends sizes. The platform pairs a couture-grade storefront experience with an AI Fashion Assistant (LLM + RAG), smart vector search, a full admin/merchandising back office, multi-provider payments, and shipping orchestration.
+**AURÉLLE** is a premium, women-only fashion e-commerce platform whose flagship differentiator is an **AI Virtual Fitting Room** that overlays garments onto a shopper's own body with an on-device, AR-style render and recommends sizes — running 100% free and entirely in the browser. The platform pairs a couture-grade storefront experience with an AI Fashion Assistant (LLM + RAG), smart vector search, a full admin/merchandising back office, multi-provider payments, and shipping orchestration.
 
-The system is built on **Next.js 14 (App Router)** with **TypeScript**, styled with **Tailwind CSS**, **shadcn/ui**, and **Framer Motion** for refined motion design. Persistence is **PostgreSQL** with the **pgvector** extension for semantic/visual search and recommendation embeddings. Media and try-on renders are stored in **S3** behind a **CDN**, and the application is deployed on **Vercel** with heavy ML inference offloaded to a dedicated GPU inference service.
+The system is built on **Next.js 14 (App Router)** with **TypeScript**, styled with **Tailwind CSS**, **shadcn/ui**, and **Framer Motion** for refined motion design. Persistence is **PostgreSQL** with the **pgvector** extension for semantic/visual search and recommendation embeddings. Product media is stored in **S3** behind a **CDN**, and the application is deployed on **Vercel**. The flagship virtual fitting room runs **100% free and fully client-side**: on-device ML (MediaPipe / TensorFlow.js over WebGL/WASM) handles pose detection, person segmentation, and the garment overlay in the browser, so try-on needs no paid GPU service, no API keys, and incurs no per-image cost — and raw user images never leave the device.
 
 This document combines visual architecture (Mermaid diagrams, component breakdown, sequence flows) with code-first contracts (TypeScript interfaces, API specs, algorithmic specifications) and a set of property-based correctness invariants that govern cart math, inventory, pricing, size recommendation, and authorization.
 
@@ -52,6 +52,7 @@ graph TD
     subgraph Client["Client / Browser"]
         UI["Next.js 14 App Router<br/>RSC + Client Components<br/>Tailwind / shadcn / Framer Motion"]
         SW["Camera / Photo Capture<br/>(getUserMedia)"]
+        TRYON["Virtual Fitting Room<br/>Client-side ML (MediaPipe / TF.js)<br/>pose + segmentation + 2D overlay"]
     end
 
     subgraph Edge["Vercel Edge / CDN"]
@@ -66,7 +67,6 @@ graph TD
     end
 
     subgraph AI["AI Services"]
-        TRYON["Virtual Fitting Room<br/>GPU Inference Service"]
         ASSIST["Fashion Assistant<br/>LLM + RAG Orchestrator"]
         EMB["Embedding Service<br/>CLIP / text-embedding-3"]
     end
@@ -74,7 +74,7 @@ graph TD
     subgraph Data["Data & Storage"]
         PG[("PostgreSQL + pgvector")]
         REDIS[("Redis<br/>cache / sessions / locks")]
-        QUEUE["Job Queue<br/>(try-on, emails, webhooks)"]
+        QUEUE["Job Queue<br/>(emails, webhooks)"]
         S3["S3 Object Store"]
     end
 
@@ -88,6 +88,8 @@ graph TD
     UI --> EDGE --> RSC
     UI --> CDN --> S3
     SW --> API
+    SW --> TRYON
+    TRYON --> CDN
     RSC --> BFF
     API --> BFF
     BFF --> PG
@@ -95,11 +97,8 @@ graph TD
     BFF --> QUEUE
     BFF --> S3
     BFF --> ASSIST
-    BFF --> TRYON
     ASSIST --> EMB --> PG
     ASSIST --> WEATHER
-    TRYON --> S3
-    QUEUE --> TRYON
     QUEUE --> MAIL
     BFF --> PAY
     PAY -- webhooks --> API
@@ -111,7 +110,7 @@ graph TD
 
 - **Server-first rendering**: Catalog, PDP, and content pages are React Server Components for SEO + fast first paint; interactivity (cart, try-on, assistant) is islands of Client Components.
 - **Service layer isolation**: Route Handlers and Server Actions are thin; all business rules live in a typed service layer so they are unit/property testable independent of HTTP.
-- **Offload heavy ML**: GPU-bound try-on inference never runs on Vercel serverless. It is dispatched to a dedicated GPU service (Modal / Replicate / RunPod / SageMaker) via an async job queue; the UI polls or subscribes for the result.
+- **Client-side try-on**: the virtual fitting room runs entirely in the shopper's browser using on-device ML (MediaPipe / TensorFlow.js over WebGL/WASM). There is no GPU service, job queue, or render storage — pose detection, segmentation, and the 2D garment overlay are computed synchronously on-device, and raw images never leave the browser.
 - **Idempotency + atomicity at the boundaries**: Payments, inventory decrements, and webhook handlers are idempotent and transactional.
 - **Vector-native**: Product, image, and user-preference embeddings live in pgvector with HNSW indexes, powering search, recommendations, and RAG.
 
@@ -124,34 +123,32 @@ graph TD
 ```mermaid
 sequenceDiagram
     participant U as User (Browser)
-    participant API as Route Handler /api/try-on
-    participant SVC as TryOnService
-    participant Q as Job Queue
-    participant GPU as GPU Inference Service
-    participant S3 as S3 / CDN
-    participant DB as Postgres
+    participant CAM as Camera / Photo (getUserMedia)
+    participant ML as Client-side ML (MediaPipe / TF.js)
+    participant OV as Garment Overlay Renderer (WebGL / Canvas)
+    participant CDN as CDN (garment image)
+    participant API as Route Handler /api/try-on/size (optional)
 
-    U->>API: POST /api/try-on (photo or camera frame, body params, productId, size)
-    API->>SVC: createTryOnJob(input)
-    SVC->>S3: putObject(rawUserImage) [encrypted, short TTL]
-    SVC->>DB: insert TryOnJob(status=QUEUED)
-    SVC->>Q: enqueue(jobId)
-    API-->>U: 202 Accepted { jobId, status: QUEUED }
+    U->>CAM: upload photo OR start live camera
+    CAM-->>ML: image / video frame (stays on device)
+    U->>CDN: GET garment image (already on CDN)
+    ML->>ML: BlazePose landmarks (shoulders, torso, hips)
+    ML->>ML: Selfie Segmentation / BodyPix person mask
+    ML->>OV: landmarks + person mask
+    CDN-->>OV: garment image
+    OV->>OV: anchor + warp 2D garment overlay to landmarks
+    OV-->>U: rendered try-on (front view, before/after, instant switch)
 
-    Q->>GPU: process(jobId, imageRef, garmentRef, params)
-    GPU->>GPU: MediaPipe pose + body landmarks
-    GPU->>GPU: SAM/U2-Net person & garment segmentation
-    GPU->>GPU: Garment warp + VITON-HD / TryOnDiffusion render
-    GPU->>GPU: Fabric drape sim + multi-view + 360° frames
-    GPU->>S3: putObject(renderedViews)
-    GPU->>DB: update TryOnJob(status=DONE, sizeRecommendation, outputRefs)
+    U->>OV: change size / compare two sizes
+    OV->>OV: rescale overlay per size (size simulation)
+    OV-->>U: updated overlay (no server round-trip)
 
-    loop poll / SSE
-        U->>API: GET /api/try-on/{jobId}
-        API->>DB: read job
-        API-->>U: { status, views[], recommendedSize, fitNotes }
+    opt optional size recommendation
+        U->>API: POST /api/try-on/size { height, weight, bodyType, usualSize, availableSizes }
+        API-->>U: { recommendedSize ∈ availableSizes, confidence ∈ [0,1], fitNote }
     end
-    U->>S3: GET rendered views (via CDN)
+
+    note over U,OV: All image processing is local — raw images are never uploaded.<br/>360° rotation and photorealistic fabric drape are approximate in the free client-side version.
 ```
 
 ### 2. Checkout & Payment
@@ -279,9 +276,10 @@ graph TD
     PDP --> TryOnCTA["TryOnLauncher (client)"]
 
     Pages --> Fit["FittingRoom (client)"]
-    Fit --> Capture["PhotoCapturePanel"]
-    Fit --> Render["TryOnRenderViewer (multi-view/360)"]
-    Fit --> SizePanel["SizeSimulator / Compare"]
+    Fit --> Capture["PhotoCapturePanel (upload / live camera)"]
+    Fit --> MLmod["On-device ML (MediaPipe / TF.js)"]
+    Fit --> Render["TryOnOverlayViewer (front view, before/after)"]
+    Fit --> SizePanel["SizeSimulator / Two-size Compare"]
 
     Pages --> Cart["CartView (client)"]
     Pages --> Assistant["AssistantChat (client, SSE)"]
@@ -331,11 +329,15 @@ interface ShippingService {
 }
 
 // ---------- AI ----------
+// Try-on rendering is performed SYNCHRONOUSLY in the browser (no server job,
+// no queue, no polling). Only size recommendation may optionally call a tiny
+// stateless serverless endpoint; it never receives a user image.
 interface TryOnService {
-  createTryOnJob(input: TryOnInput): Promise<TryOnJob>;
-  getJob(jobId: string): Promise<TryOnJob>;
-  recommendSize(input: SizeRecInput): Promise<SizeRecommendation>;
-  compareSizes(input: SizeCompareInput): Promise<SizeComparison>;
+  // Runs fully client-side: detects pose + person segmentation and composites
+  // the 2D garment overlay onto the user's photo/frame. No upload, no job id.
+  renderTryOn(input: TryOnInput): TryOnRender;            // synchronous, in-browser
+  recommendSize(input: SizeRecInput): SizeRecommendation; // pure, deterministic
+  compareSizes(input: SizeCompareInput): SizeComparison;  // render two sizes side-by-side
 }
 
 interface AssistantService {
@@ -368,7 +370,6 @@ erDiagram
     USER ||--o{ ORDER : places
     USER ||--o{ FAVORITE : saves
     USER ||--o{ REVIEW : writes
-    USER ||--o{ TRYON_JOB : runs
     PRODUCT ||--o{ PRODUCT_VARIANT : has
     PRODUCT ||--o{ PRODUCT_IMAGE : has
     PRODUCT ||--o{ REVIEW : receives
@@ -464,8 +465,11 @@ interface BodyProfile {
   heightCm?: number;
   weightKg?: number;
   bust?: number; waist?: number; hips?: number;
+  bodyType?: "pear" | "hourglass" | "rectangle" | "apple" | "inverted-triangle";
   preferredFit?: "slim" | "regular" | "relaxed";
-  consentToStoreImages: boolean; // privacy: explicit opt-in
+  usualSize?: SizeLabel;
+  // No image-upload consent field: try-on images are processed locally in the
+  // browser and are never uploaded or stored server-side.
 }
 
 interface Order {
@@ -496,17 +500,31 @@ interface ProductEmbedding {
   imageVec: number[]; // 512-d  (CLIP image) — pgvector
 }
 
-interface TryOnJob {
-  id: UUID;
-  userId?: UUID;
+interface TryOnRender {
   productId: UUID;
   variantId: UUID;
-  status: "QUEUED" | "PROCESSING" | "DONE" | "FAILED";
-  inputImageRef: string;       // encrypted S3 ref, short TTL
-  outputViewRefs: string[];    // multi-view + 360° frames
+  size: SizeLabel;
+  // Rendered overlay frame(s) exist only in the browser (canvas / blob URLs);
+  // never persisted server-side, never uploaded.
+  overlayDataUrls: string[];   // front view (+ optional before/after); local only
   recommendedSize?: SizeLabel;
-  fitNotes?: string;
-  createdAt: string;
+  fitNote?: string;
+}
+
+// Lightweight, serializable result of the deterministic size algorithm.
+interface SizeRecommendation {
+  recommendedSize: SizeLabel;  // MUST be a member of the product's available sizes (P4)
+  confidence: number;          // in [0, 1]
+  fitNote: string;             // e.g., "ajustado" | "regular" | "holgado"
+}
+
+interface SizeRecInput {
+  availableSizes: SizeLabel[]; // non-empty
+  heightCm?: number;
+  weightKg?: number;
+  bodyType?: "pear" | "hourglass" | "rectangle" | "apple" | "inverted-triangle";
+  complexion?: string;         // optional; only tints the overlay, never affects size
+  usualSize?: SizeLabel;
 }
 
 // ---------- RBAC ----------
@@ -566,9 +584,7 @@ interface ApiError {
 | POST | `/api/webhooks/:provider` | signed | PSP/carrier webhooks (idempotent by event id) |
 | POST | `/api/orders/:id/refund` | `order:refund` | Refund |
 | GET | `/api/orders/:id/track` | owner/support | Tracking status |
-| POST | `/api/try-on` | session/guest | Create try-on job (returns 202 + jobId) |
-| GET | `/api/try-on/:jobId` | owner | Job status + render views |
-| POST | `/api/try-on/size` | session | Size recommendation/compare |
+| POST | `/api/try-on/size` | optional | Deterministic size recommendation/compare (stateless; no image, no cost) |
 | POST | `/api/assistant` | session/guest | Stream chat (SSE) |
 | GET | `/api/favorites` / POST / DELETE | session | Wishlist CRUD |
 | POST | `/api/reviews` | verified buyer | Submit review |
@@ -678,8 +694,39 @@ END
 function recommendSize(input: SizeRecInput): SizeRecommendation
 ```
 
-**Preconditions:** `input.availableSizes` is non-empty; body measurements present or default fit used.
-**Postconditions:** `result.recommendedSize ∈ input.availableSizes`; `result.confidence ∈ [0, 1]`; if measurements are missing, falls back to the closest available size to the user's historical purchases (still within `availableSizes`).
+**Pure & deterministic** — runs in the browser (or a tiny stateless serverless function); no external API, no API keys, no per-call cost. Inputs: `heightCm`, `weightKg`, `bodyType`, `complexion` (optional), `usualSize`, and the product's `availableSizes`.
+
+```pascal
+ALGORITHM recommendSize(input)
+INPUT: input { availableSizes (non-empty), heightCm?, weightKg?, bodyType?, complexion?, usualSize? }
+OUTPUT: SizeRecommendation { recommendedSize, confidence, fitNote }
+
+BEGIN
+  ASSERT input.availableSizes is non-empty
+
+  IF heightCm AND weightKg are present THEN
+    bmi        <- weightKg / (heightCm / 100)^2
+    ideal      <- mapMetricsToSizeIndex(bmi, bodyType)   // deterministic mapping
+    confidence <- 0.85
+  ELSE IF usualSize present THEN
+    ideal      <- indexOfNearest(usualSize, availableSizes)
+    confidence <- 0.6
+  ELSE
+    ideal      <- indexOfNearest(DEFAULT_SIZE, availableSizes)
+    confidence <- 0.4
+  END IF
+
+  // clamp the ideal index into the available range, then pick a real member
+  idx             <- clamp(ideal, 0, length(availableSizes) - 1)
+  recommendedSize <- availableSizes[idx]                 // GUARANTEES membership (P4)
+
+  fitNote <- classifyFit(idx, ideal)   // "ajustado" | "regular" | "holgado"
+  RETURN { recommendedSize, confidence, fitNote }
+END
+```
+
+**Preconditions:** `input.availableSizes` is non-empty; body measurements present, or `usualSize`/default fit used. `complexion` (if provided) only influences overlay tinting, never the size result.
+**Postconditions:** `result.recommendedSize ∈ input.availableSizes` (chosen by index into the available set, so membership is guaranteed — preserves **P4**); `result.confidence ∈ [0, 1]`; `result.fitNote ∈ {"ajustado", "regular", "holgado"}`. Pure: no side effects, no network required.
 
 ### Authorization Check
 
@@ -697,34 +744,32 @@ function assertPermission(session: Session, permission: Permission): void
 
 ```mermaid
 graph LR
-    IMG["User photo / camera frame + body params"] --> POSE["Pose & landmarks<br/>MediaPipe / BlazePose"]
-    POSE --> SEG["Segmentation<br/>SAM + U2-Net (person & garment mask)"]
-    SEG --> WARP["Garment warping<br/>(TPS / flow)"]
-    WARP --> GEN["Try-on synthesis<br/>VITON-HD / TryOnDiffusion / IDM-VTON"]
-    GEN --> DRAPE["Fabric drape sim<br/>(material params: weight, stretch, sheen)"]
-    DRAPE --> VIEWS["Multi-view + 360° frame render"]
-    VIEWS --> OUT["Encrypted S3 output + before/after"]
+    IMG["User photo / live camera frame<br/>(stays on device)"] --> POSE["Pose & body landmarks<br/>MediaPipe Pose / TF.js BlazePose"]
+    POSE --> SEG["Person segmentation<br/>MediaPipe Selfie Segmentation / TF.js BodyPix"]
+    SEG --> ANCHOR["Anchor to landmarks<br/>(shoulders, torso, hips)"]
+    GARMENT["Garment image (from CDN)"] --> WARP
+    ANCHOR --> WARP["2D garment overlay + warp<br/>(WebGL / Canvas)"]
+    WARP --> COMPOSITE["Composite over user image<br/>front view + before/after"]
+    COMPOSITE --> OUT["Rendered in-browser<br/>(never uploaded)"]
 ```
 
 | Stage | Technology | Runs on |
 | --- | --- | --- |
-| Pose / body landmarks | **MediaPipe Pose / BlazePose** | GPU inference service (can also pre-run client-side for quick preview) |
-| Person & garment segmentation | **SAM (Segment Anything)** + **U2-Net** | GPU inference service |
-| Garment warping | TPS / appearance-flow | GPU inference service |
-| Try-on synthesis | **VITON-HD** (baseline), **TryOnDiffusion / IDM-VTON** (diffusion, higher fidelity) | GPU inference service (Modal / Replicate / RunPod / SageMaker) |
-| Fabric drape | physically-based drape parameters per fabric (`weightGsm`, `stretch`, `sheen`) modulating the diffusion conditioning | GPU inference service |
-| Multi-view / 360° | sequential renders at N camera angles | GPU inference service |
-| Orchestration / job state | Next.js Route Handlers + job queue | Vercel + queue |
+| Pose / body landmarks | **MediaPipe Pose / TensorFlow.js (BlazePose)** | Browser (WebGL / WASM) |
+| Person segmentation | **MediaPipe Selfie Segmentation / TensorFlow.js (BodyPix)** | Browser (WebGL / WASM) |
+| Garment overlay & warp | 2D anchor + warp to body landmarks (TPS-lite) on **WebGL / Canvas** | Browser |
+| Composite & views | front view + before/after toggle + per-size rescale | Browser |
+| Size recommendation | pure, deterministic algorithm | Browser (or tiny stateless serverless fn) |
 
-**Why offloaded:** diffusion try-on is GPU- and latency-heavy and exceeds Vercel serverless limits. Jobs are enqueued; the UI shows progress and renders results from the CDN when `status=DONE`. A lightweight MediaPipe preview can run client-side (WASM) for instant pose feedback before the full render.
+**Why client-side (and free):** the entire try-on runs on-device with MediaPipe / TensorFlow.js over WebGL/WASM, so there is no paid GPU service, no API keys, and no per-image cost. Rendering is synchronous in the browser — no job queue, no polling, no server render storage. **Tradeoff (called out honestly):** this is an approximate, AR-style 2D overlay; true 360° rotation and photorealistic fabric drape are limited/approximate compared to a server-side diffusion render.
 
 ### Capabilities
 
-- **Inputs:** uploaded photo or live camera capture (`getUserMedia`), plus optional body params from `BodyProfile`.
-- **Garment-on-body render** with **fabric drape** tuned by material metadata.
-- **Size simulation / recommendation / compare:** render the same garment in multiple sizes; recommend best fit; side-by-side compare.
-- **Multi-view + 360°** rendered frames; **before/after** toggle.
-- **Privacy:** raw user images are encrypted, short-TTL, and only stored when the user explicitly opts in (`consentToStoreImages`); otherwise deleted immediately after render.
+- **Inputs:** uploaded photo or live camera capture (`getUserMedia`); all frames stay on the device. Optional body params from `BodyProfile` feed the size recommendation.
+- **Garment overlay on body** anchored and warped to detected landmarks (shoulders, torso, hips) and composited over the user's image — an approximate AR-style overlay, not a photorealistic render.
+- **Size simulation / recommendation / compare:** rescale the overlay per size; deterministic size recommendation; side-by-side **two-size** comparison.
+- **Views:** **front view** with **before/after** toggle and **instant garment switching**. 360° rotation and photorealistic fabric drape are limited/approximate in this free client-side version (explicit tradeoff for a zero-cost, fully private experience).
+- **Privacy:** all processing happens in the browser — raw user images are **processed locally and never uploaded** or stored on any server.
 
 ---
 
@@ -760,7 +805,8 @@ graph LR
 | Concern | Mechanism |
 | --- | --- |
 | Server data (catalog, PDP, orders) | React Server Components + `fetch` cache / `revalidate` tags |
-| Client server-state (cart, favorites, try-on polling) | **TanStack Query** (caching, retries, polling, SSE updates) |
+| Client server-state (cart, favorites) | **TanStack Query** (caching, retries, polling, SSE updates) |
+| Try-on render state (on-device) | local component state + Web Workers / WASM; overlay results held in browser memory only (never uploaded) |
 | Ephemeral UI state (modals, mega-nav, filters) | **Zustand** stores (small, colocated) |
 | Cart identity | secure cookie (`cartId`); guest carts merge into user cart on login |
 | Auth/session | HTTP-only secure cookie; session read in Edge middleware |
@@ -797,7 +843,7 @@ src/
 │       ├── products/route.ts
 │       ├── cart/[id]/**/route.ts
 │       ├── checkout/route.ts
-│       ├── try-on/[[...jobId]]/route.ts
+│       ├── try-on/size/route.ts        # optional, stateless size recommendation
 │       ├── assistant/route.ts
 │       ├── search/route.ts
 │       └── webhooks/[provider]/route.ts
@@ -829,7 +875,7 @@ src/
 | Reservation expired | TTL passed before payment | `410 RESERVATION_EXPIRED` | re-price + re-reserve |
 | Payment failed | PSP declines | `402` + reason | release reservation; allow retry/alt method |
 | Duplicate webhook | event id already processed | `200` no-op | idempotent dedupe table |
-| Try-on failure | GPU error / bad image | job `FAILED` + reason | prompt re-upload; never charge; raw image purged |
+| Try-on failure | model load / unsupported device / no pose detected | inline in-browser error + reason | prompt re-capture / better lighting; nothing uploaded; runs fully on-device |
 | Assistant retrieval empty | no matching products | graceful "no exact match" + alternatives | broaden filters |
 | Authz failure | missing permission | `403 FORBIDDEN` | logged to audit trail |
 
@@ -846,7 +892,7 @@ src/
 
 ### Integration / E2E
 - API route handlers against an ephemeral Postgres (+pgvector) and stubbed PSP/carrier.
-- **Playwright** for storefront, PDP, cart→checkout, and fitting-room flows. AI/GPU calls are mocked in CI; a nightly job exercises a real GPU endpoint.
+- **Playwright** for storefront, PDP, cart→checkout, and fitting-room flows. The assistant LLM and search are mocked in CI; the client-side try-on (MediaPipe / TF.js) runs headlessly with WebGL enabled, or is stubbed for deterministic CI.
 
 ---
 
@@ -947,8 +993,8 @@ fc.assert(fc.property(arbRole(), arbPermission(), arbRequest(), (role, perm, req
 - **Images**: `next/image` with AVIF/WebP, responsive sizes, CDN edge caching; 360°/spin frames lazy-loaded and pre-warmed on hover.
 - **Caching**: Redis for hot reads (product, available stock), cache tags invalidated on writes; PSP/idempotency dedupe keys in Redis.
 - **Vector search**: HNSW indexes; ANN `k` bounded; pre-filtered by SQL predicates to keep candidate sets small.
-- **AI try-on**: queue + autoscaling GPU workers; backpressure with per-user concurrency caps; results cached per (user, garment, size) hash.
-- **Targets (initial)**: storefront TTFB < 300ms (edge), PDP LCP < 2.5s, search p95 < 400ms, checkout API p95 < 600ms (excluding PSP), try-on render typically 5–20s async.
+- **AI try-on**: runs client-side (MediaPipe / TF.js over WebGL/WASM) — zero server GPU cost and no queue; ML models are CDN-cached and lazy-loaded once, then run on-device. Heavier model variants are gated behind a quick WebGL/capability check with a lightweight fallback.
+- **Targets (initial)**: storefront TTFB < 300ms (edge), PDP LCP < 2.5s, search p95 < 400ms, checkout API p95 < 600ms (excluding PSP), client-side try-on overlay renders in near real time on-device (no async server round-trip).
 
 ---
 
@@ -959,11 +1005,11 @@ fc.assert(fc.property(arbRole(), arbPermission(), arbRequest(), (role, perm, req
 - **CSRF**: double-submit token / SameSite cookies on state-changing requests; Server Actions use framework CSRF protection.
 - **XSS**: React auto-escaping; strict Content-Security-Policy; sanitize CMS/journal HTML; no `dangerouslySetInnerHTML` without sanitization.
 - **Rate limiting**: per-IP/per-user limits on auth, checkout, try-on, and assistant endpoints (Redis token bucket) at the edge.
-- **Encryption**: TLS in transit; encryption at rest for DB and S3; try-on raw images encrypted with short TTL and consent-gated retention.
+- **Encryption**: TLS in transit; encryption at rest for DB and S3. Try-on raw images are processed locally in the browser and never uploaded, so there is no server-side try-on image storage to encrypt or expire.
 - **PCI**: card data never touches our servers — handled by PSP SDKs/Elements; we store only tokens/intent ids; scope minimized to SAQ-A.
 - **Webhooks**: signature verification + idempotency dedupe; reject unsigned/forged events.
 - **Secrets**: managed via Vercel/secret store; no secrets in client bundles.
-- **Privacy**: explicit consent for body images; data deletion/export endpoints (GDPR/CCPA).
+- **Privacy**: try-on images are processed locally and never leave the device (no upload, no server retention, no consent-to-upload needed); standard data deletion/export endpoints remain for account data (GDPR/CCPA).
 
 ---
 
@@ -978,14 +1024,14 @@ graph LR
     REVIEW --> MAIN["Merge to main"]
     MAIN --> PROD["Vercel Production"]
     MAIN --> MIG["DB migrations (gated)"]
-    MAIN --> GPU["GPU worker image publish"]
+    MAIN --> ASSETS["Client-side ML assets publish to CDN"]
 ```
 
 - **CI gates**: ESLint, `tsc --noEmit`, Vitest unit, fast-check property tests, Playwright e2e (AI/PSP mocked).
 - **Preview environments**: every PR gets a Vercel preview with an isolated DB branch.
 - **Migrations**: versioned, forward-only, run as a gated step before promoting production.
-- **GPU workers**: containerized try-on models deployed/scaled independently of the web app.
-- **Observability**: structured logs + request ids, error tracking (Sentry), metrics/alerts on checkout, payment, and try-on queues.
+- **Client-side ML assets**: try-on ML models (MediaPipe / TF.js) are versioned static assets served from the CDN and lazy-loaded in the browser — there are no GPU workers to deploy or scale.
+- **Observability**: structured logs + request ids, error tracking (Sentry), metrics/alerts on checkout and payment flows; client-side try-on errors reported via the browser error tracker.
 - **Rollback**: instant Vercel rollback to previous deployment; migrations designed to be backward compatible.
 
 ---
@@ -1011,7 +1057,7 @@ graph LR
 | Data | PostgreSQL + pgvector, Prisma (or Drizzle) ORM, Redis |
 | Storage/CDN | S3-compatible object store + CDN |
 | Payments | Stripe, PayPal, MercadoPago, Apple Pay, Google Pay |
-| AI (try-on) | MediaPipe/BlazePose, SAM, U2-Net, VITON-HD / TryOnDiffusion / IDM-VTON on Modal/Replicate/RunPod/SageMaker |
+| AI (try-on) | **Client-side, free:** MediaPipe (Pose, Selfie Segmentation) / TensorFlow.js (BlazePose, BodyPix) running in-browser over WebGL/WASM; 2D garment overlay on Canvas/WebGL. No GPU service, no API keys, no per-image cost. |
 | AI (assistant/search) | LLM (GPT-4o / Claude), text-embedding-3, CLIP, RAG over pgvector |
 | Validation | Zod, React Hook Form |
 | State | TanStack Query, Zustand |
