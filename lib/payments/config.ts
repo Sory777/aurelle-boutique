@@ -10,7 +10,7 @@
  * nothing is hard-coded across components.
  */
 export const ORDERING_CONFIG = {
-  whatsapp: { phoneE164: "+524451963616", number: "524451963616" },
+  whatsapp: { phoneE164: "+526242388064", number: "526242388064" },
   paypal: { businessEmail: "elsory271288@gmail.com" },
   bankTransfer: {
     method: "SPEI",
