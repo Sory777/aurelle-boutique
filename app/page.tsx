@@ -1,17 +1,7 @@
 import Image from "next/image";
 import Link from "next/link";
-import {
-  demoProducts,
-  heroImage,
-  editorialImage,
-  type DemoProduct,
-} from "@/lib/demo-data";
-
-const priceFormatter = new Intl.NumberFormat("es-MX", {
-  style: "currency",
-  currency: "USD",
-  maximumFractionDigits: 0,
-});
+import { ProductCard } from "@/components/product/ProductCard";
+import { demoProducts, heroImage, editorialImage } from "@/lib/demo-data";
 
 function Hero() {
   return (
@@ -54,40 +44,6 @@ function Hero() {
   );
 }
 
-function ProductCard({ product }: { product: DemoProduct }) {
-  return (
-    <Link
-      href={`/p/${product.slug}`}
-      className="group block"
-      aria-label={product.name}
-    >
-      <div className="relative aspect-[3/4] overflow-hidden bg-blush">
-        <Image
-          src={product.image}
-          alt={product.name}
-          fill
-          sizes="(max-width: 640px) 50vw, (max-width: 1024px) 33vw, 25vw"
-          className="object-cover object-center transition-transform duration-700 ease-luxe group-hover:scale-105"
-        />
-        <span className="absolute left-4 top-4 bg-ivory/90 px-3 py-1 text-[0.65rem] uppercase tracking-eyebrow text-noir opacity-0 transition-opacity duration-300 ease-luxe group-hover:opacity-100">
-          Ver pieza
-        </span>
-      </div>
-      <div className="mt-4 flex items-start justify-between gap-3">
-        <div>
-          <p className="eyebrow">{product.categoryLabel}</p>
-          <h3 className="mt-1 font-display text-lg leading-snug text-noir transition-colors duration-300 ease-luxe group-hover:text-champagne-deep">
-            {product.name}
-          </h3>
-        </div>
-        <p className="shrink-0 pt-1 text-sm tabular-nums text-noir">
-          {priceFormatter.format(product.price)}
-        </p>
-      </div>
-    </Link>
-  );
-}
-
 function NewCollection() {
   return (
     <section className="mx-auto max-w-editorial px-6 py-24">
@@ -107,7 +63,7 @@ function NewCollection() {
       </div>
 
       <div className="mt-12 grid grid-cols-2 gap-x-6 gap-y-12 md:grid-cols-3 lg:grid-cols-4">
-        {demoProducts.map((product) => (
+        {demoProducts.slice(0, 8).map((product) => (
           <ProductCard key={product.slug} product={product} />
         ))}
       </div>
