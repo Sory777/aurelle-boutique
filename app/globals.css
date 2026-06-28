@@ -1,0 +1,35 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  html {
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+  }
+
+  body {
+    @apply bg-ivory font-sans text-noir;
+  }
+
+  ::selection {
+    @apply bg-champagne/30 text-noir;
+  }
+}
+
+@layer components {
+  /* Eyebrow / category label treatment */
+  .eyebrow {
+    @apply text-xs uppercase tracking-eyebrow text-taupe;
+  }
+
+  /* Primary champagne CTA button */
+  .btn-primary {
+    @apply inline-flex items-center justify-center bg-noir px-9 py-4 text-xs uppercase tracking-eyebrow text-ivory transition-colors duration-300 ease-luxe hover:bg-champagne-deep;
+  }
+
+  /* Outlined / ghost button */
+  .btn-ghost {
+    @apply inline-flex items-center justify-center border border-noir px-9 py-4 text-xs uppercase tracking-eyebrow text-noir transition-all duration-300 ease-luxe hover:bg-noir hover:text-ivory;
+  }
+}
